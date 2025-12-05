@@ -37,7 +37,7 @@ ENV/
 .settings/
 CLAUDE.md
 ARCHITECTURE.md
-.claude
+.claude/
 
 # Environment variables
 .env
