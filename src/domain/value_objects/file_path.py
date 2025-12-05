@@ -31,7 +31,8 @@ class FilePath:
     @property
     def directory(self) -> str:
         """Get the parent directory path."""
-        return str(Path(self.value).parent)
+        # Use as_posix() to ensure consistent forward slashes across platforms
+        return Path(self.value).parent.as_posix()
 
     def __str__(self) -> str:
         return self.value
