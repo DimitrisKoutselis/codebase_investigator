@@ -35,6 +35,8 @@ ENV/
 .project
 .pydevproject
 .settings/
+CLAUDE.md
+ARCHITECTURE.md
 
 # Environment variables
 .env
