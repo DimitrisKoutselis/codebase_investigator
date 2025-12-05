@@ -1,9 +1,10 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { ArrowLeft, GitBranch, Loader2 } from 'lucide-react'
+import { ArrowLeft, GitBranch, Loader2, Wifi, WifiOff } from 'lucide-react'
 import ChatMessage from '../components/ChatMessage'
 import ChatInput from '../components/ChatInput'
 import apiClient from '../api/client'
+import { useWebSocketChat } from '../hooks/useWebSocketChat'
 
 interface Message {
   id: string
@@ -15,10 +16,62 @@ interface Message {
 export default function ChatPage() {
   const { codebaseId } = useParams<{ codebaseId: string }>()
   const [messages, setMessages] = useState<Message[]>([])
-  const [loading, setLoading] = useState(false)
   const [sessionId] = useState(() => crypto.randomUUID())
   const [codebaseInfo, setCodebaseInfo] = useState<{ url: string } | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  // Use a ref to track the current assistant message ID to avoid stale closures
+  const currentAssistantMessageIdRef = useRef<string | null>(null)
+
+  // WebSocket chat callbacks using refs
+  const handleChunk = useCallback((chunk: string) => {
+    const messageId = currentAssistantMessageIdRef.current
+    if (!messageId) return
+
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === messageId
+          ? { ...msg, content: msg.content + chunk }
+          : msg
+      )
+    )
+  }, [])
+
+  const handleDone = useCallback((sources: Array<{ path: string }>) => {
+    const messageId = currentAssistantMessageIdRef.current
+    if (!messageId) return
+
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === messageId
+          ? { ...msg, sources }
+          : msg
+      )
+    )
+    currentAssistantMessageIdRef.current = null
+  }, [])
+
+  const handleError = useCallback((error: string) => {
+    const messageId = currentAssistantMessageIdRef.current
+    if (!messageId) return
+
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === messageId
+          ? { ...msg, content: `Error: ${error}` }
+          : msg
+      )
+    )
+    currentAssistantMessageIdRef.current = null
+  }, [])
+
+  const { isConnected, isStreaming, sendMessage } = useWebSocketChat({
+    codebaseId: codebaseId || '',
+    sessionId,
+    onChunk: handleChunk,
+    onDone: handleDone,
+    onError: handleError,
+  })
 
   useEffect(() => {
     // Fetch codebase info
@@ -35,88 +88,76 @@ export default function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  const handleSendMessage = async (content: string) => {
-    if (!codebaseId) return
+  const handleSendMessage = useCallback((content: string) => {
+    if (!codebaseId || isStreaming) return
 
+    // Add user message
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: 'user',
       content,
     }
 
-    setMessages((prev) => [...prev, userMessage])
-    setLoading(true)
-
-    try {
-      // Use streaming if available, otherwise fall back to regular endpoint
-      let fullResponse = ''
-      const assistantMessageId = crypto.randomUUID()
-
-      // Add placeholder for assistant message
-      setMessages((prev) => [
-        ...prev,
-        { id: assistantMessageId, role: 'assistant', content: '' },
-      ])
-
-      try {
-        // Try streaming first
-        for await (const chunk of apiClient.streamMessage(
-          codebaseId,
-          sessionId,
-          content
-        )) {
-          fullResponse += chunk
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === assistantMessageId
-                ? { ...msg, content: fullResponse }
-                : msg
-            )
-          )
-        }
-      } catch {
-        // Fall back to regular endpoint
-        const response = await apiClient.sendMessage(
-          codebaseId,
-          sessionId,
-          content
-        )
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === assistantMessageId
-              ? { ...msg, content: response.response, sources: response.sources }
-              : msg
-          )
-        )
-      }
-    } catch (error) {
-      const errorMessage: Message = {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        content: `Error: ${error instanceof Error ? error.message : 'Failed to get response'}`,
-      }
-      setMessages((prev) => [...prev.slice(0, -1), errorMessage])
-    } finally {
-      setLoading(false)
+    // Create placeholder for assistant message
+    const assistantMessageId = crypto.randomUUID()
+    const assistantMessage: Message = {
+      id: assistantMessageId,
+      role: 'assistant',
+      content: '',
     }
-  }
+
+    setMessages((prev) => [...prev, userMessage, assistantMessage])
+    currentAssistantMessageIdRef.current = assistantMessageId
+
+    // Send via WebSocket
+    const sent = sendMessage(content)
+
+    if (!sent) {
+      // WebSocket failed, update with error
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantMessageId
+            ? { ...msg, content: 'Error: Failed to connect. Please try again.' }
+            : msg
+        )
+      )
+      currentAssistantMessageIdRef.current = null
+    }
+  }, [codebaseId, isStreaming, sendMessage])
 
   const repoName = codebaseInfo?.url?.split('/').slice(-2).join('/') || 'Loading...'
 
   return (
     <div className="flex flex-col h-[calc(100vh-8rem)]">
       {/* Header */}
-      <div className="flex items-center space-x-4 pb-4 border-b border-slate-200">
-        <Link
-          to="/"
-          className="flex items-center space-x-2 text-slate-600 hover:text-slate-900 transition-colors"
-        >
-          <ArrowLeft className="h-5 w-5" />
-          <span>Back</span>
-        </Link>
+      <div className="flex items-center justify-between pb-4 border-b border-slate-200">
+        <div className="flex items-center space-x-4">
+          <Link
+            to="/"
+            className="flex items-center space-x-2 text-slate-600 hover:text-slate-900 transition-colors"
+          >
+            <ArrowLeft className="h-5 w-5" />
+            <span>Back</span>
+          </Link>
+          <div className="flex items-center space-x-2">
+            <GitBranch className="h-5 w-5 text-slate-500" />
+            <span className="font-medium text-slate-800">{repoName}</span>
+          </div>
+        </div>
+
+        {/* Connection status */}
         <div className="flex items-center space-x-2">
-          <GitBranch className="h-5 w-5 text-slate-500" />
-          <span className="font-medium text-slate-800">{repoName}</span>
+          {isConnected ? (
+            <>
+              <Wifi className="h-4 w-4 text-green-500" />
+              <span className="text-sm text-green-600">Connected</span>
+            </>
+          ) : (
+            <>
+              <WifiOff className="h-4 w-4 text-red-500" />
+              <span className="text-sm text-red-600">Disconnected</span>
+            </>
+          )}
         </div>
       </div>
 
@@ -144,7 +185,8 @@ export default function ChatPage() {
                 <button
                   key={suggestion}
                   onClick={() => handleSendMessage(suggestion)}
-                  className="px-4 py-2 bg-white border border-slate-200 rounded-lg text-sm text-slate-700 hover:bg-slate-50 transition-colors text-left"
+                  disabled={!isConnected || isStreaming}
+                  className="px-4 py-2 bg-white border border-slate-200 rounded-lg text-sm text-slate-700 hover:bg-slate-50 transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {suggestion}
                 </button>
@@ -161,7 +203,7 @@ export default function ChatPage() {
             />
           ))
         )}
-        {loading && messages[messages.length - 1]?.role === 'user' && (
+        {isStreaming && messages[messages.length - 1]?.content === '' && (
           <div className="flex items-center space-x-2 text-slate-500">
             <Loader2 className="h-5 w-5 animate-spin" />
             <span>Thinking...</span>
@@ -172,7 +214,11 @@ export default function ChatPage() {
 
       {/* Input */}
       <div className="pt-4 border-t border-slate-200">
-        <ChatInput onSend={handleSendMessage} loading={loading} />
+        <ChatInput
+          onSend={handleSendMessage}
+          disabled={!isConnected}
+          loading={isStreaming}
+        />
       </div>
     </div>
   )
